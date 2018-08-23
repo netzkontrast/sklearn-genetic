@@ -17,6 +17,7 @@
 
 import multiprocessing
 import random
+import copy
 import numpy as np
 from sklearn.utils import check_X_y
 from sklearn.utils.metaestimators import if_delegate_has_method
@@ -33,7 +34,10 @@ from deap import algorithms
 from deap import base
 from deap import creator
 from deap import tools
-
+import signal
+import sys
+import joblib
+import os
 
 creator.create("Fitness", base.Fitness, weights=(1.0, -1.0))
 creator.create("Individual", list, fitness=creator.Fitness)
@@ -46,19 +50,32 @@ def _evalFunction(individual, gaobject, estimator, X, y, cv, scorer, verbose, fi
     individual_tuple = tuple(individual)
     if caching and individual_tuple in gaobject.scores_cache:
         return gaobject.scores_cache[individual_tuple], individual_sum
-    X_selected = X[:, np.array(individual, dtype=np.bool)]
+    x_selected = X[:, np.array(individual, dtype=np.bool)]
     scores = []
-    if fit_params.eval_set is not None:
-        if isinstance(fit_params.eval_set, tuple):
-            fit_params.eval_set = [fit_params.eval_set]
-        for i, valid_data in enumerate(fit_params.eval_set):
-            fit_params.eval_set[i][0] = fit_params.eval_set[i][0][:, np.array(individual, dtype=np.bool)]
+
+    if fit_params['eval_set'] is not None:
+        eval_set_params = copy.deepcopy(fit_params)
+        for i, valid_data in enumerate(eval_set_params['eval_set']):
+            x_eval, y_eval = check_X_y(valid_data[0], valid_data[1], "csr")
+            x_eval_selected = x_eval[:, np.array(individual, dtype=np.bool)]
+            eval_set_params['eval_set'][i][0] = x_eval_selected
+    else:
+        eval_set_params = fit_params
+
     for train, test in cv.split(X, y):
-        score = _fit_and_score(estimator=estimator, X=X_selected, y=y, scorer=scorer,
+        score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
-                               fit_params=fit_params)
+                               fit_params=eval_set_params)
+        if verbose > 2:
+            print('individual with {0:d} features scores: {1:1.5f}'
+                  .format(individual_sum, score[0]))
+
         scores.append(score)
     scores_mean = np.mean(scores)
+    scores_std = np.std(scores)
+    if verbose > 2:
+        print('in total: {0:1.5f} (std: {1:1.5f})'.format(scores_mean, scores_std))
+
     if caching:
         gaobject.scores_cache[individual_tuple] = scores_mean
     return scores_mean, individual_sum
@@ -163,7 +180,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
     def __init__(self, estimator, cv=None, scoring=None, fit_params=None, verbose=0, n_jobs=1,
                  n_population=300, crossover_proba=0.5, mutation_proba=0.2, n_generations=40,
                  crossover_independent_proba=0.1, mutation_independent_proba=0.05,
-                 tournament_size=3, caching=False):
+                 tournament_size=3, caching=False, filename='genetics.z'):
         self.estimator = estimator
         self.cv = cv
         self.scoring = scoring
@@ -179,10 +196,17 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         self.tournament_size = tournament_size
         self.caching = caching
         self.scores_cache = {}
+        self.filename = filename
 
     @property
     def _estimator_type(self):
         return self.estimator._estimator_type
+
+    def signal_handler(self, sig, frame):
+        print('WAIT, we store what we have done so far')
+        filename = os.path.join(os.getcwd(), self.filename)
+        joblib.dump(self, filename, compress=True)
+        sys.exit(0)
 
     def fit(self, X, y):
         """Fit the GeneticSelectionCV model and then the underlying estimator on the selected
@@ -196,6 +220,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         y : array-like, shape = [n_samples]
             The target values.
         """
+        signal.signal(signal.SIGINT, self.signal_handler)
         return self._fit(X, y)
 
     def _fit(self, X, y):
@@ -231,10 +256,10 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         pop = toolbox.population(n=self.n_population)
         hof = tools.HallOfFame(1, similar=np.array_equal)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
-        stats.register("avg", np.mean, axis=0)
-        stats.register("std", np.std, axis=0)
-        stats.register("min", np.min, axis=0)
-        stats.register("max", np.max, axis=0)
+        stats.register("avg", self.rounded_mean)
+        stats.register("std", self.rounded_std)
+        stats.register("min", self.rounded_min)
+        stats.register("max", self.rounded_max)
 
         if self.verbose > 0:
             print("Selecting features with genetic algorithm.")
@@ -246,6 +271,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
             pool.close()
             pool.join()
 
+        print('done')
         # Set final attributes
         support_ = np.array(hof, dtype=np.bool)[0]
         self.estimator_ = clone(self.estimator)
@@ -256,6 +282,26 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         self.support_ = support_
 
         return self
+
+    @staticmethod
+    def rounded_std(value, decimals=6):
+        std = np.std(value, axis=0)
+        return [np.round(std[0], decimals=decimals), np.round(std[1], decimals=1)]
+
+    @staticmethod
+    def rounded_mean(value, decimals=6):
+        mean = np.mean(value, axis=0)
+        return [np.round(mean[0], decimals=decimals), int(mean[1])]
+
+    @staticmethod
+    def rounded_min(value, decimals=6):
+        min = np.min(value, axis=0)
+        return [np.round(min[0], decimals=decimals), int(min[1])]
+
+    @staticmethod
+    def rounded_max(value, decimals=6):
+        max = np.max(value, axis=0)
+        return [np.round(max[0], decimals=decimals), int(max[1])]
 
     @if_delegate_has_method(delegate='estimator')
     def predict(self, X):
