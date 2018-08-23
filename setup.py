@@ -2,7 +2,7 @@ from setuptools import setup
 from setuptools import find_packages
 
 setup(name='sklearn-genetic',
-      version='0.1',
+      version='0.1.1',
       description='Genetic feature selection module for scikit-learn',
       url='http://github.com/manuel-calzolari/sklearn-genetic',
       author='Manuel Calzolari',

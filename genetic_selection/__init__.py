@@ -48,6 +48,11 @@ def _evalFunction(individual, gaobject, estimator, X, y, cv, scorer, verbose, fi
         return gaobject.scores_cache[individual_tuple], individual_sum
     X_selected = X[:, np.array(individual, dtype=np.bool)]
     scores = []
+    if fit_params.eval_set is not None:
+        if isinstance(fit_params.eval_set, tuple):
+            fit_params.eval_set = [fit_params.eval_set]
+        for i, valid_data in enumerate(fit_params.eval_set):
+            fit_params.eval_set[i][0] = fit_params.eval_set[i][0][:, np.array(individual, dtype=np.bool)]
     for train, test in cv.split(X, y):
         score = _fit_and_score(estimator=estimator, X=X_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
