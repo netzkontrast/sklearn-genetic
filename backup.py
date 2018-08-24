@@ -266,7 +266,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
 
     >>> import numpy as np
     >>> from sklearn import datasets, linear_model
-    >>> from genetic_selection import GeneticSelectionCV
+    >>> from backup import GeneticSelectionCV
     >>> iris = datasets.load_iris()
     >>> E = np.random.uniform(0, 0.1, size=(len(iris.data), 20))
     >>> X = np.hstack((iris.data, E))

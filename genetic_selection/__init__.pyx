@@ -152,13 +152,12 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
 
     del eval_set_params
 
-
     print (80 * '=')
     print (80 * '=')
     print ('Individual scored')
-    print ('holdout-score' + data_dict['holdout_score'])
-    print ('cv-score' + data_dict['cv_score'])
-    print ('n_features' + data_dict['estimator_n_features_'])
+    print ('holdout-score: {:.5f}'.format(data_dict['holdout_score']))
+    print ('cv-score     : {:.5f}'.format(data_dict['cv_score']))
+    print ('n_features   : {:6d}'.format(data_dict['estimator_n_features_']))
     print (80 * '=')
     print (80 * '=')
     del data_dict
@@ -266,7 +265,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
 
     >>> import numpy as np
     >>> from sklearn import datasets, linear_model
-    >>> from genetic_selection import GeneticSelectionCV
+    >>> from backup import GeneticSelectionCV
     >>> iris = datasets.load_iris()
     >>> E = np.random.uniform(0, 0.1, size=(len(iris.data), 20))
     >>> X = np.hstack((iris.data, E))
@@ -312,8 +311,12 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
             if restore and os.path.isfile(cache_file_name):
                 self.scores_cache = joblib.load(cache_file_name)
                 if self.verbose:
+                    print(80 * '=')
+                    print(80 * '=')
                     print('{} cache entries restored'
                           .format(len(self.scores_cache)))
+                    print(80 * '=')
+                    print(80 * '=')
 
     @property
     def _estimator_type(self):
