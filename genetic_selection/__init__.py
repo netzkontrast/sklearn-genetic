@@ -76,6 +76,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             x_eval, y_eval = check_X_y(valid_data[0], valid_data[1], "csr")
             x_eval_selected = x_eval[:, np.array(individual, dtype=np.bool)]
             eval_set_params['eval_set'][i][0] = x_eval_selected
+            eval_set_params['eval_set'][i][1] = y_eval
     else:
         eval_set_params = fit_params
 
@@ -87,17 +88,23 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         oof_test = np.zeros((test_selected.shape[0],))
         oof_test_skf = np.empty((cv.get_n_splits(), test_selected.shape[0]))
 
+    fit_time = score_time = 0
     start_time = time.time()
-    for train, test in cv.split(X, y):
-        fit_time = time.time() - start_time
+
+    for train, test in cv.split(x_selected, y):
+
+        x_selected_test, y_test = check_X_y(x_selected[test], y[test], "csr")
+        eval_set_params['eval_set'][1][0] = x_selected_test
+        eval_set_params['eval_set'][1][0] = y_test
+        eval_set_params['eval_names'][1] = 'cv-valid'
+
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
                                fit_params=eval_set_params)
 
+        fit_time = time.time() - start_time
+        print('Learning done in {:f} seconds'.format(fit_time))
         scores.append(score)
-
-        score_time = time.time() - start_time - fit_time
-        total_time = score_time + fit_time
 
         # if it is not empty - we want oof predictions
         if test_data is not None:
@@ -106,6 +113,13 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             oof_test_skf[fold, :] = estimator.booster_.predict(test_selected,
                                                                num_iteration=estimator.best_iteration_)
             fold += 1
+
+        score_time = time.time() - start_time - fit_time
+        print('predicting done in {:f} seconds'.format(score_time))
+
+    total_time = score_time + fit_time
+
+    print('individual done in {:f} seconds'.format(total_time))
 
     scores_mean = np.mean(scores)
     scores_std = np.std(scores)
@@ -118,6 +132,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
 
         data_dict = {
             'holdout_score': float(estimator.best_score_['oof']['auc']),
+            'estimator_scores': estimator.best_score_,
             'oof_test_folds': oof_test_skf,
             'oof_train': oof_train,
             'oof_test_mean': oof_test,
@@ -134,6 +149,9 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             'individual_hash': str(hash(tuple(individual))),
             'time': time.time()
         }
+        del scores, oof_test_skf, oof_test, oof_train, eval_set_params
+        del x_selected_test, y_test, test_selected, x_eval_selected, x_eval, y_eval
+        gc.collect()
 
         name = '{:.5f}_{:d}_{:.4f}_{:.4f}_{}_oof_data'.format(
             data_dict['holdout_score'],
@@ -150,17 +168,15 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         filename = os.path.join(os.getcwd(), 'cache.z')
         joblib.dump(gaobject.scores_cache, filename, compress=True)
 
-    del eval_set_params
-
-
-    print (80 * '=')
-    print (80 * '=')
-    print ('Individual scored')
-    print ('holdout-score' + data_dict['holdout_score'])
-    print ('cv-score' + data_dict['cv_score'])
-    print ('n_features' + data_dict['estimator_n_features_'])
-    print (80 * '=')
-    print (80 * '=')
+    del eval_set_params, filename
+    print(80 * '=')
+    print(80 * '=')
+    print('Individual scored')
+    print('holdout-score: {:.5f}'.format(data_dict['holdout_score']))
+    print('cv-score     : {:.5f}'.format(data_dict['cv_score']))
+    print('n_features   : {:6d}'.format(data_dict['estimator_n_features_']))
+    print(80 * '=')
+    print(80 * '=')
     del data_dict
     gc.collect()
 
@@ -266,7 +282,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
 
     >>> import numpy as np
     >>> from sklearn import datasets, linear_model
-    >>> from backup import GeneticSelectionCV
+    >>> from genetic_selection import GeneticSelectionCV
     >>> iris = datasets.load_iris()
     >>> E = np.random.uniform(0, 0.1, size=(len(iris.data), 20))
     >>> X = np.hstack((iris.data, E))
@@ -312,8 +328,13 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
             if restore and os.path.isfile(cache_file_name):
                 self.scores_cache = joblib.load(cache_file_name)
                 if self.verbose:
-                    print('{} cache entries restored'
-                          .format(len(self.scores_cache)))
+                    if self.verbose:
+                        print(80 * '=')
+                        print(80 * '=')
+                        print('{} cache entries restored'
+                              .format(len(self.scores_cache)))
+                        print(80 * '=')
+                        print(80 * '=')
 
     @property
     def _estimator_type(self):
