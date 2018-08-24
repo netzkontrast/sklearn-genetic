@@ -68,25 +68,28 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
     if caching and individual_tuple in gaobject.scores_cache:
         return gaobject.scores_cache[individual_tuple], individual_sum
     x_selected = X[:, np.array(individual, dtype=np.bool)]
+
     scores = []
+    x_holdout_selected = []
 
     if fit_params['eval_set'] is not None:
         eval_set_params = copy.deepcopy(fit_params)
         for i, valid_data in enumerate(eval_set_params['eval_set']):
-            x_eval, y_eval = check_X_y(valid_data[0], valid_data[1], "csr")
-            x_eval_selected = x_eval[:, np.array(individual, dtype=np.bool)]
-            eval_set_params['eval_set'][i][0] = x_eval_selected
-            eval_set_params['eval_set'][i][1] = y_eval
+            x_holdout, y_holdout = check_X_y(valid_data[0], valid_data[1], "csr")
+            x_holdout_selected = x_holdout[:, np.array(individual, dtype=np.bool)]
+            eval_set_params['eval_set'][i][0] = x_holdout_selected
+            eval_set_params['eval_set'][i][1] = y_holdout
     else:
         eval_set_params = fit_params
 
     fold = 0
-    test_selected = oof_test = oof_train = oof_test_skf = None
+    x_test_selected = oof_test = oof_train = oof_test_skf = oof_holdout = None
     if test_data is not None:
-        test_selected = test_data[:, np.array(individual, dtype=np.bool)]
+        x_test_selected = test_data[:, np.array(individual, dtype=np.bool)]
         oof_train = np.zeros((x_selected.shape[0],))
-        oof_test = np.zeros((test_selected.shape[0],))
-        oof_test_skf = np.empty((cv.get_n_splits(), test_selected.shape[0]))
+        oof_holdout = np.empty((cv.get_n_splits(), x_holdout_selected.shape[0]))
+        oof_test = np.zeros((x_test_selected.shape[0],))
+        oof_test_skf = np.empty((cv.get_n_splits(), x_test_selected.shape[0]))
 
     fit_time = score_time = 0
     start_time = time.time()
@@ -96,7 +99,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         eval_set_params['eval_set'].append([x_selected_test, y_test])
         eval_set_params['eval_names'].append('cv-valid')
 
-        print ('reset estimator')
+        print('reset estimator')
         estimator = clone(estimator)
 
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
@@ -116,8 +119,11 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         if test_data is not None:
             oof_train[test] = estimator.booster_.predict(x_selected[test],
                                                          num_iteration=estimator.best_iteration_)
-            oof_test_skf[fold, :] = estimator.booster_.predict(test_selected,
+            oof_test_skf[fold, :] = estimator.booster_.predict(x_test_selected,
                                                                num_iteration=estimator.best_iteration_)
+            oof_holdout[fold, :] = estimator.booster_.predict(x_holdout_selected,
+                                                              num_iteration=estimator.best_iteration_)
+
             fold += 1
 
         score_time = time.time() - start_time - fit_time
@@ -138,6 +144,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
 
         data_dict = {
             'holdout_score': float(estimator.best_score_['oof']['auc']),
+            'holdout_prediction_folds': oof_holdout,
             'estimator_scores': estimator.best_score_,
             'oof_test_folds': oof_test_skf,
             'oof_train': oof_train,
@@ -156,7 +163,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             'time': time.time()
         }
         del scores, oof_test_skf, oof_test, oof_train, eval_set_params
-        del test_selected
+        del x_test_selected
         gc.collect()
 
         name = '{:.5f}_{:d}_{:.4f}_{:.4f}_{}_oof_data'.format(
@@ -173,8 +180,8 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         gaobject.scores_cache[individual_tuple] = scores_mean
         filename = os.path.join(os.getcwd(), 'cache.z')
         joblib.dump(gaobject.scores_cache, filename, compress=True)
+        del filename
 
-    del eval_set_params, filename
     print(80 * '=')
     print(80 * '=')
     print('Individual scored')
