@@ -29,7 +29,7 @@ from sklearn.base import clone
 from sklearn.base import is_classifier
 from sklearn.model_selection import check_cv
 from sklearn.model_selection._validation import _fit_and_score
-from sklearn.metrics.scorer import check_scoring, roc_auc_score
+from sklearn.metrics.scorer import check_scoring
 from sklearn.feature_selection.base import SelectorMixin
 from sklearn.externals.joblib import cpu_count
 from deap import algorithms
@@ -42,12 +42,13 @@ import sys
 import joblib
 import os
 import time
+import gc
 
 creator.create("Fitness", base.Fitness, weights=(1.0, -1.0))
 creator.create("Individual", list, fitness=creator.Fitness)
 
 
-def _init_selected_features(n_features=None, lower_percentage=5, higher_percentage=60):
+def _init_selected_features(n_features=None, lower_percentage=5, higher_percentage=90):
     if n_features is not None:
         percentage = np.random.randint(lower_percentage, higher_percentage)
         k = n_features * percentage // 100
@@ -79,17 +80,23 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         eval_set_params = fit_params
 
     fold = 0
+    test_selected = oof_test = oof_train = oof_test_skf = None
     if test_data is not None:
         test_selected = test_data[:, np.array(individual, dtype=np.bool)]
         oof_train = np.zeros((x_selected.shape[0],))
         oof_test = np.zeros((test_selected.shape[0],))
         oof_test_skf = np.empty((cv.get_n_splits(), test_selected.shape[0]))
 
+    start_time = time.time()
     for train, test in cv.split(X, y):
+        fit_time = time.time() - start_time
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
                                fit_params=eval_set_params)
         scores.append(score)
+
+        score_time = time.time() - start_time - fit_time
+        total_time = score_time + fit_time
 
         # if it is not empty - we want oof predictions
         if test_data is not None:
@@ -98,13 +105,15 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             oof_test_skf[fold, :] = estimator.booster_.predict(test_selected,
                                                                num_iteration=estimator.best_iteration_)
             fold += 1
-    if test_data is not None:
 
+    scores_mean = np.mean(scores)
+    scores_std = np.std(scores)
+
+    if test_data is not None:
         oof_test[:] = oof_test_skf.mean(axis=0)
         oof_train = oof_train.reshape(-1, 1)
         oof_test = oof_test.reshape(-1, 1)
-        scores_mean = np.mean(scores)
-        scores_std = np.std(scores)
+
 
         data_dict = {
             'holdout_score': float(estimator.best_score_['oof']['auc']),
@@ -125,9 +134,11 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             'time': time.time()
         }
 
-        name = '{:.5f}_{}_{}_oof_data'.format(
+        name = '{:.5f}_{:d}_{:.4f}_{:.4f}_{}_oof_data'.format(
             data_dict['holdout_score'],
-            data_dict['time'],
+            data_dict['estimator_n_features_'],
+            data_dict['cv_score'],
+            data_dict['cv_score_std'],
             data_dict['individual_hash']
         )
 
@@ -135,9 +146,10 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
 
     if caching:
         gaobject.scores_cache[individual_tuple] = scores_mean
-        if random.randint(0, 4) == 0:
-            filename = os.path.join(os.getcwd(), 'cache.z')
-            joblib.dump(gaobject.scores_cache, filename, compress=True)
+        filename = os.path.join(os.getcwd(), 'cache.z')
+        joblib.dump(gaobject.scores_cache, filename, compress=True)
+        gc.collect()
+
     return scores_mean, individual_sum
 
 
@@ -279,6 +291,8 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         self.test_data = test_data
         self.restore = restore
 
+        gc.enable()
+
         if self.caching:
             cache_file_name = self.get_storage_path('cache.z')
             if restore and os.path.isfile(cache_file_name):
@@ -300,7 +314,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
             filename = self.get_storage_path('cache.z')
             joblib.dump(self.scores_cache, filename, compress=True)
 
-        joblib.dump(self, self.get_storage_path(self.filename), compress=True)
+        # joblib.dump(self, self.get_storage_path(self.filename), compress=True)
 
     @staticmethod
     def restore(filename):
