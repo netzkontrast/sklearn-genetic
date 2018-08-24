@@ -1,6 +1,8 @@
 # sklearn-genetic - Genetic feature selection module for scikit-learn
 # Copyright (C) 2016  Manuel Calzolari
 #
+# modified (C) 2018 Michael Schimmer
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, version 3 of the License.
@@ -34,16 +36,30 @@ from deap import algorithms
 from deap import base
 from deap import creator
 from deap import tools
+from functools import partial
 import signal
 import sys
 import joblib
 import os
+import time
 
 creator.create("Fitness", base.Fitness, weights=(1.0, -1.0))
 creator.create("Individual", list, fitness=creator.Fitness)
 
 
-def _evalFunction(individual, gaobject, estimator, X, y, cv, scorer, verbose, fit_params, caching):
+def _init_selected_features(n_features=None, lower_percentage=5, higher_percentage=60):
+    if n_features is not None:
+        percentage = np.random.randint(lower_percentage, higher_percentage)
+        k = n_features * percentage // 100
+        indices = random.sample(range(n_features), k)
+        feat_gene = np.zeros(n_features, dtype=bool)
+        feat_gene[indices] = True
+        return feat_gene
+    raise ValueError('we need the total feature counr')
+
+
+def _eval_function(individual, gaobject, estimator, X, y, cv,
+                   scorer, verbose, fit_params, caching, test_data=None):
     individual_sum = np.sum(individual, axis=0)
     if individual_sum == 0:
         return -10000, individual_sum
@@ -62,23 +78,74 @@ def _evalFunction(individual, gaobject, estimator, X, y, cv, scorer, verbose, fi
     else:
         eval_set_params = fit_params
 
+    fold = 0
+    test_selected = test_data[:, np.array(individual, dtype=np.bool)]
+    oof_train = np.zeros((x_selected.shape[0],))
+    oof_test = np.zeros((test_selected.shape[0],))
+    oof_test_skf = np.empty((cv.get_n_splits, test_selected.shape[0]))
+
     for train, test in cv.split(X, y):
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
                                fit_params=eval_set_params)
-        if verbose > 2:
-            print('individual with {0:d} features scores: {1:1.5f}'
-                  .format(individual_sum, score[0]))
-
         scores.append(score)
+
+        # if it is not empty - we want oof predictions
+        if test_data is not None:
+            oof_train[test] = estimator.booster_.predict(x_selected[test],
+                                                         num_iteration=estimator.best_iteration_)
+            oof_test_skf[fold, :] = estimator.booster_.predict(test_selected,
+                                                               num_iteration=estimator.best_iteration_)
+            fold += 1
+
+    oof_test[:] = oof_test_skf.mean(axis=0)
+    oof_train = oof_train.reshape(-1, 1)
+    oof_test = oof_test.reshape(-1, 1)
     scores_mean = np.mean(scores)
     scores_std = np.std(scores)
-    if verbose > 2:
-        print('in total: {0:1.5f} (std: {1:1.5f})'.format(scores_mean, scores_std))
+
+    data_dict = {
+        'holdout_score': float(estimator.best_score_['oof']['auc']),
+        'oof_score': scorer(y, oof_train),
+        'oof_test_folds': oof_test_skf,
+        'oof_train': oof_train,
+        'oof_test_mean': oof_test,
+        'estimator_params': estimator.get_params(),
+        'estimator_feature_importance': estimator.feature_importances_,
+        'estimator_best_iteration': int(estimator.best_iteration_),
+        'estimator_n_features_': estimator.n_features_,
+        'original_n_features': X.shape[0],
+        'cv_scores': scores,
+        'cv_score': scores_mean,
+        'cv_score_std': scores_std,
+        'folds': fold,
+        'individual': individual,
+        'individual_hash': str(hash(individual)),
+        'time': time.time()
+    }
+
+    name = '{:.5f}_{}_{}_oof_data'.format(
+        data_dict['holdout_score'],
+        data_dict['time'],
+        data_dict['individual_hash']
+    )
+
+    save_oof_predictions(name, data_dict)
 
     if caching:
         gaobject.scores_cache[individual_tuple] = scores_mean
+        if random.randint(0, 4) == 0:
+            filename = os.path.join(os.getcwd(), 'cache.z')
+            joblib.dump(gaobject.scores_cache, filename, compress=True)
     return scores_mean, individual_sum
+
+
+def save_oof_predictions(name, data):
+    working_dir = os.getcwd()
+    working_dir = os.path.join(working_dir, 'oof_predictions')
+    if not os.path.isdir(working_dir):
+        os.mkdir(working_dir)
+    joblib.dump(data, os.path.join(working_dir, name + '.z'), compress=True)
 
 
 class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
@@ -145,6 +212,13 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
     caching : boolean, default=False
         If True, scores of the genetic algorithm are cached.
 
+    filename : string, default='genetics.z'
+        filename of restore file
+
+    restore : boolean, default=False
+        If True, and there is a file in current directory, we restore
+        the session.
+
     Attributes
     ----------
     n_features_ : int
@@ -177,10 +251,14 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
     array([ True  True  True  True False False False False False False False False
            False False False False False False False False False False False False], dtype=bool)
     """
+
     def __init__(self, estimator, cv=None, scoring=None, fit_params=None, verbose=0, n_jobs=1,
                  n_population=300, crossover_proba=0.5, mutation_proba=0.2, n_generations=40,
                  crossover_independent_proba=0.1, mutation_independent_proba=0.05,
-                 tournament_size=3, caching=False, filename='genetics.z'):
+                 tournament_size=3, caching=False, filename='genetics.z', restore=True,
+                 test_data=None
+                 ):
+
         self.estimator = estimator
         self.cv = cv
         self.scoring = scoring
@@ -197,15 +275,42 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         self.caching = caching
         self.scores_cache = {}
         self.filename = filename
+        self.test_data = test_data
+        self.restore = restore
+
+        if self.caching:
+            cache_file_name = self.get_storage_path('cache.z')
+            if restore and os.path.isfile(cache_file_name):
+                self.scores_cache = joblib.load(cache_file_name)
+                if self.verbose:
+                    print('{} cache entries restored'
+                          .format(len(self.scores_cache)))
 
     @property
     def _estimator_type(self):
         return self.estimator._estimator_type
 
+    @staticmethod
+    def get_storage_path(filename):
+        return os.path.join(os.getcwd(), filename)
+
+    def save(self):
+        if self.caching:
+            filename = self.get_storage_path('cache.z')
+            joblib.dump(self.scores_cache, filename, compress=True)
+
+        joblib.dump(self, self.get_storage_path(self.filename), compress=True)
+
+    @staticmethod
+    def restore(filename):
+        print('restoring')
+        object = joblib.load(GeneticSelectionCV.get_storage_path(filename))
+        print('{} individuals restored'.format(len(object.scores_cache)))
+        return object
+
     def signal_handler(self, sig, frame):
         print('WAIT, we store what we have done so far')
-        filename = os.path.join(os.getcwd(), self.filename)
-        joblib.dump(self, filename, compress=True)
+        self.save()
         sys.exit(0)
 
     def fit(self, X, y):
@@ -234,14 +339,12 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
 
         # Genetic Algorithm
         toolbox = base.Toolbox()
-
-        toolbox.register("attr_bool", random.randint, 0, 1)
-        toolbox.register("individual", tools.initRepeat,
-                         creator.Individual, toolbox.attr_bool, n=n_features)
+        init_features = partial(_init_selected_features, n_features=n_features)
+        toolbox.register("individual", tools.initIterate, creator.Individual, init_features)
         toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-        toolbox.register("evaluate", _evalFunction, gaobject=self, estimator=estimator, X=X, y=y,
+        toolbox.register("evaluate", _eval_function, gaobject=self, estimator=estimator, X=X, y=y,
                          cv=cv, scorer=scorer, verbose=self.verbose, fit_params=self.fit_params,
-                         caching=self.caching)
+                         caching=self.caching, test=self.test_data)
         toolbox.register("mate", tools.cxUniform, indpb=self.crossover_independent_proba)
         toolbox.register("mutate", tools.mutFlipBit, indpb=self.mutation_independent_proba)
         toolbox.register("select", tools.selTournament, tournsize=self.tournament_size)
@@ -254,7 +357,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
             toolbox.register("map", pool.map)
 
         pop = toolbox.population(n=self.n_population)
-        hof = tools.HallOfFame(1, similar=np.array_equal)
+        hof = tools.HallOfFame(5, similar=np.array_equal)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", self.rounded_mean)
         stats.register("std", self.rounded_std)
