@@ -92,15 +92,18 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
     start_time = time.time()
 
     for train, test in cv.split(x_selected, y):
-
         x_selected_test, y_test = check_X_y(x_selected[test], y[test], "csr")
-        eval_set_params['eval_set'][1][0] = x_selected_test
-        eval_set_params['eval_set'][1][0] = y_test
-        eval_set_params['eval_names'][1] = 'cv-valid'
+        eval_set_params['eval_set'].append([x_selected_test, y_test])
+        eval_set_params['eval_names'].append('cv-valid')
 
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
                                train=train, test=test, verbose=verbose, parameters=None,
                                fit_params=eval_set_params)
+
+        # cleanup for the next round
+        del eval_set_params['eval_names'][1]
+        del eval_set_params['eval_set'][1], x_selected_test, y_test
+        gc.collect()
 
         fit_time = time.time() - start_time
         print('Learning done in {:f} seconds'.format(fit_time))
@@ -150,7 +153,7 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             'time': time.time()
         }
         del scores, oof_test_skf, oof_test, oof_train, eval_set_params
-        del x_selected_test, y_test, test_selected, x_eval_selected, x_eval, y_eval
+        del test_selected
         gc.collect()
 
         name = '{:.5f}_{:d}_{:.4f}_{:.4f}_{}_oof_data'.format(
