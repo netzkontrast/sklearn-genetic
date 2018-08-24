@@ -21,7 +21,7 @@ import multiprocessing
 import random
 import copy
 import numpy as np
-from sklearn.utils import check_X_y
+from sklearn.utils import check_X_y, check_array
 from sklearn.utils.metaestimators import if_delegate_has_method
 from sklearn.base import BaseEstimator
 from sklearn.base import MetaEstimatorMixin
@@ -29,7 +29,7 @@ from sklearn.base import clone
 from sklearn.base import is_classifier
 from sklearn.model_selection import check_cv
 from sklearn.model_selection._validation import _fit_and_score
-from sklearn.metrics.scorer import check_scoring
+from sklearn.metrics.scorer import check_scoring, roc_auc_score
 from sklearn.feature_selection.base import SelectorMixin
 from sklearn.externals.joblib import cpu_count
 from deap import algorithms
@@ -79,10 +79,11 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
         eval_set_params = fit_params
 
     fold = 0
-    test_selected = test_data[:, np.array(individual, dtype=np.bool)]
-    oof_train = np.zeros((x_selected.shape[0],))
-    oof_test = np.zeros((test_selected.shape[0],))
-    oof_test_skf = np.empty((cv.get_n_splits, test_selected.shape[0]))
+    if test_data is not None:
+        test_selected = test_data[:, np.array(individual, dtype=np.bool)]
+        oof_train = np.zeros((x_selected.shape[0],))
+        oof_test = np.zeros((test_selected.shape[0],))
+        oof_test_skf = np.empty((cv.get_n_splits(), test_selected.shape[0]))
 
     for train, test in cv.split(X, y):
         score = _fit_and_score(estimator=estimator, X=x_selected, y=y, scorer=scorer,
@@ -97,40 +98,40 @@ def _eval_function(individual, gaobject, estimator, X, y, cv,
             oof_test_skf[fold, :] = estimator.booster_.predict(test_selected,
                                                                num_iteration=estimator.best_iteration_)
             fold += 1
+    if test_data is not None:
 
-    oof_test[:] = oof_test_skf.mean(axis=0)
-    oof_train = oof_train.reshape(-1, 1)
-    oof_test = oof_test.reshape(-1, 1)
-    scores_mean = np.mean(scores)
-    scores_std = np.std(scores)
+        oof_test[:] = oof_test_skf.mean(axis=0)
+        oof_train = oof_train.reshape(-1, 1)
+        oof_test = oof_test.reshape(-1, 1)
+        scores_mean = np.mean(scores)
+        scores_std = np.std(scores)
 
-    data_dict = {
-        'holdout_score': float(estimator.best_score_['oof']['auc']),
-        'oof_score': scorer(y, oof_train),
-        'oof_test_folds': oof_test_skf,
-        'oof_train': oof_train,
-        'oof_test_mean': oof_test,
-        'estimator_params': estimator.get_params(),
-        'estimator_feature_importance': estimator.feature_importances_,
-        'estimator_best_iteration': int(estimator.best_iteration_),
-        'estimator_n_features_': estimator.n_features_,
-        'original_n_features': X.shape[0],
-        'cv_scores': scores,
-        'cv_score': scores_mean,
-        'cv_score_std': scores_std,
-        'folds': fold,
-        'individual': individual,
-        'individual_hash': str(hash(individual)),
-        'time': time.time()
-    }
+        data_dict = {
+            'holdout_score': float(estimator.best_score_['oof']['auc']),
+            'oof_test_folds': oof_test_skf,
+            'oof_train': oof_train,
+            'oof_test_mean': oof_test,
+            'estimator_params': estimator.get_params(),
+            'estimator_feature_importance': estimator.feature_importances_,
+            'estimator_best_iteration': int(estimator.best_iteration_),
+            'estimator_n_features_': estimator.n_features_,
+            'original_n_features': X.shape[0],
+            'cv_scores': scores,
+            'cv_score': scores_mean,
+            'cv_score_std': scores_std,
+            'folds': fold,
+            'individual': individual,
+            'individual_hash': str(hash(tuple(individual))),
+            'time': time.time()
+        }
 
-    name = '{:.5f}_{}_{}_oof_data'.format(
-        data_dict['holdout_score'],
-        data_dict['time'],
-        data_dict['individual_hash']
-    )
+        name = '{:.5f}_{}_{}_oof_data'.format(
+            data_dict['holdout_score'],
+            data_dict['time'],
+            data_dict['individual_hash']
+        )
 
-    save_oof_predictions(name, data_dict)
+        save_oof_predictions(name, data_dict)
 
     if caching:
         gaobject.scores_cache[individual_tuple] = scores_mean
@@ -330,6 +331,9 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
 
     def _fit(self, X, y):
         X, y = check_X_y(X, y, "csr")
+        if self.test_data is not None:
+            test_data = check_array(self.test_data, "cst")
+
         # Initialization
         cv = check_cv(self.cv, y, is_classifier(self.estimator))
         scorer = check_scoring(self.estimator, scoring=self.scoring)
@@ -344,7 +348,7 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
         toolbox.register("population", tools.initRepeat, list, toolbox.individual)
         toolbox.register("evaluate", _eval_function, gaobject=self, estimator=estimator, X=X, y=y,
                          cv=cv, scorer=scorer, verbose=self.verbose, fit_params=self.fit_params,
-                         caching=self.caching, test=self.test_data)
+                         caching=self.caching, test_data=test_data)
         toolbox.register("mate", tools.cxUniform, indpb=self.crossover_independent_proba)
         toolbox.register("mutate", tools.mutFlipBit, indpb=self.mutation_independent_proba)
         toolbox.register("select", tools.selTournament, tournsize=self.tournament_size)
